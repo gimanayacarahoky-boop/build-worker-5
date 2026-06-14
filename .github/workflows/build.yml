@@ -1,0 +1,90 @@
+name: Build Worker
+
+on:
+  repository_dispatch:
+    types: [build]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          
+      - name: Build APK
+        run: |
+          BUILD_ID="${{ github.event.client_payload.buildId }}"
+          MODE="${{ github.event.client_payload.mode }}"
+          BUILD_TYPE="${{ github.event.client_payload.buildType }}"
+          URL="${{ github.event.client_payload.url }}"
+          APP_NAME="${{ github.event.client_payload.appName }}"
+          APP_ICON="${{ github.event.client_payload.appIcon }}"
+          CHAT_ID="${{ github.event.client_payload.chatId }}"
+          ZIP_URL="${{ github.event.client_payload.zipUrl }}"
+          
+          mkdir -p workspace
+          cd workspace
+          
+          if [ "$BUILD_TYPE" = "url_to_apk" ]; then
+            npm install -g cordova
+            cordova create app com.zarr.${APP_NAME// /} "$APP_NAME"
+            cd app
+            cordova platform add android
+            if [ -n "$APP_ICON" ]; then
+              curl -o www/icon.png "$APP_ICON" 2>/dev/null || true
+            else
+              curl -o www/icon.png "https://i.imgur.com/ZARRx.png" 2>/dev/null || true
+            fi
+            cat > www/index.html << 'EOF'
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>APP_NAME</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}iframe{width:100vw;height:100vh;border:none;}</style>
+</head>
+<body><iframe src="URL" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></body>
+</html>
+EOF
+            sed -i "s|APP_NAME|$APP_NAME|g" www/index.html
+            sed -i "s|URL|$URL|g" www/index.html
+            cordova build android --release -- --packageType=apk
+            cp platforms/android/app/build/outputs/apk/release/app-release.apk "../${BUILD_ID}_${APP_NAME// /_}.apk"
+            echo "APK_NAME=${BUILD_ID}_${APP_NAME// /_}.apk" >> $GITHUB_ENV
+          else
+            if [ -n "$ZIP_URL" ]; then
+              curl -L -o project.zip "$ZIP_URL"
+              unzip -q project.zip -d project
+              cd project
+            else
+              flutter create --org com.zarr --project-name zarr_build --platforms=android .
+            fi
+            if [ "$MODE" = "release" ]; then
+              flutter build apk --release
+              cp build/app/outputs/flutter-apk/app-release.apk "../${BUILD_ID}_android_${MODE}.apk"
+            else
+              flutter build apk --debug
+              cp build/app/outputs/flutter-apk/app-debug.apk "../${BUILD_ID}_android_${MODE}.apk"
+            fi
+            echo "APK_NAME=${BUILD_ID}_android_${MODE}.apk" >> $GITHUB_ENV
+          fi
+          
+          cd ..
+          curl -F "chat_id=${CHAT_ID}" -F "document=@${APK_NAME}" -F "caption=<blockquote>✅ BUILD SUCCESSFUL!</blockquote>\n\n━━━━━━━━━━━━━━━━━━━━━━━\n🆔 Build ID: ${BUILD_ID}\n⚙️ Mode: ${MODE}\n━━━━━━━━━━━━━━━━━━━━━━━\n\n⬇️ Download APK di atas" -F "parse_mode=HTML" "https://api.telegram.org/bot${{ secrets.BOT_TOKEN }}/sendDocument"
